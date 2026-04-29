@@ -103,9 +103,7 @@ public class AppointmentsController : ControllerBase
         await using var reader = await command.ExecuteReaderAsync();
 
         if (!await reader.ReadAsync())
-        {
             return NotFound();
-        }
 
         var result = new AppointmentDetailsDto
         {
@@ -129,5 +127,77 @@ public class AppointmentsController : ControllerBase
         };
 
         return Ok(result);
+    }
+
+    // POST /api/appointments
+    [HttpPost]
+    public async Task<IActionResult> CreateAppointment([FromBody] CreateAppointmentRequestDto request)
+    {
+        if (request.AppointmentDate <= DateTime.Now)
+            return BadRequest("Appointment date cannot be in the past");
+
+        if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Length > 250)
+            return BadRequest("Reason must be between 1 and 250 characters");
+
+        var connectionString = _configuration.GetConnectionString("DefaultConnection");
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync();
+
+        // Check patient
+        await using (var checkPatient = new SqlCommand("""
+            SELECT COUNT(1) FROM Patients WHERE IdPatient = @Id AND IsActive = 1
+        """, connection))
+        {
+            checkPatient.Parameters.Add("@Id", SqlDbType.Int).Value = request.IdPatient;
+
+            var exists = (int)await checkPatient.ExecuteScalarAsync();
+            if (exists == 0)
+                return BadRequest("Patient does not exist or is inactive");
+        }
+
+        // Check doctor
+        await using (var checkDoctor = new SqlCommand("""
+            SELECT COUNT(1) FROM Doctors WHERE IdDoctor = @Id AND IsActive = 1
+        """, connection))
+        {
+            checkDoctor.Parameters.Add("@Id", SqlDbType.Int).Value = request.IdDoctor;
+
+            var exists = (int)await checkDoctor.ExecuteScalarAsync();
+            if (exists == 0)
+                return BadRequest("Doctor does not exist or is inactive");
+        }
+
+        // Check conflict
+        await using (var checkConflict = new SqlCommand("""
+            SELECT COUNT(1)
+            FROM Appointments
+            WHERE IdDoctor = @DoctorId
+              AND AppointmentDate = @Date
+        """, connection))
+        {
+            checkConflict.Parameters.Add("@DoctorId", SqlDbType.Int).Value = request.IdDoctor;
+            checkConflict.Parameters.Add("@Date", SqlDbType.DateTime2).Value = request.AppointmentDate;
+
+            var conflict = (int)await checkConflict.ExecuteScalarAsync();
+            if (conflict > 0)
+                return Conflict("Doctor already has appointment at this time");
+        }
+
+        // Insert
+        await using (var insert = new SqlCommand("""
+            INSERT INTO Appointments (IdPatient, IdDoctor, AppointmentDate, Status, Reason)
+            VALUES (@PatientId, @DoctorId, @Date, 'Scheduled', @Reason);
+        """, connection))
+        {
+            insert.Parameters.Add("@PatientId", SqlDbType.Int).Value = request.IdPatient;
+            insert.Parameters.Add("@DoctorId", SqlDbType.Int).Value = request.IdDoctor;
+            insert.Parameters.Add("@Date", SqlDbType.DateTime2).Value = request.AppointmentDate;
+            insert.Parameters.Add("@Reason", SqlDbType.NVarChar, 250).Value = request.Reason;
+
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        return StatusCode(201);
     }
 }
